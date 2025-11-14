@@ -1,0 +1,17 @@
+[
+  {
+    "id": "1",
+    "title": "Project Overview",
+    "text": "This RAG Chatbot demo showcases retrieval augmented generation using Next.js, Tailwind CDN, and the OpenAI API. It demonstrates embedding generation, cosine-similarity retrieval, and contextual answering."
+  },
+  {
+    "id": "2",
+    "title": "How embedding works",
+    "text": "Embeddings convert text into numeric vectors. Similarity between embeddings (via cosine similarity) is used to find the most relevant document chunks for a user's query."
+  },
+  {
+    "id": "3",
+    "title": "Usage instructions",
+    "text": "Ask questions about the project, e.g., 'How does the retrieval work?' or 'How to deploy this app to Vercel?'. The chatbot will include context from stored documents."
+  }
+]
