@@ -1,109 +1,138 @@
-// app/api/chat/route.js
-
+import { dynamicKB, dynamicEmbeddings } from "../upload/route.js";
 import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
-const EMBED_MODEL = "models/text-embedding-004"; // Embeddings model
-const CHAT_MODEL = "models/gemini-2.0-flash";    // Chat model
+const EMBED_MODEL = "models/text-embedding-004";
+const CHAT_MODEL = "models/gemini-2.0-flash";
 
-let kb = null;            // knowledge base
-let kbEmbeddings = null;  // cached embeddings
+let kb = null;
+let kbEmbeddings = null;
 
-// ----------------------------------
-// Utility: Cosine Similarity
-// ----------------------------------
+
+
 function cosineSim(a, b) {
-  let dot = 0, na = 0, nb = 0;
+  let dot = 0, aMag = 0, bMag = 0;
+
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
+    aMag += a[i] ** 2;
+    bMag += b[i] ** 2;
   }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
+
+  return dot / (Math.sqrt(aMag) * Math.sqrt(bMag) + 1e-12);
 }
 
-// ----------------------------------
-// Load knowledge base JSON
-// ----------------------------------
+
+
+
 async function loadKB() {
   if (kb) return kb;
+
   const file = path.join(process.cwd(), "data", "knowledge.json");
   kb = JSON.parse(fs.readFileSync(file, "utf8"));
   return kb;
 }
 
-// ----------------------------------
-// Create & Cache embeddings for KB
-// ----------------------------------
+
+
+
 async function ensureKBEmbeddings() {
   if (kbEmbeddings) return kbEmbeddings;
 
   const items = await loadKB();
   const embedder = genAI.getGenerativeModel({ model: EMBED_MODEL });
 
-  // Get embeddings for all KB texts
-  const result = await embedder.embedContent({
-    content: items.map((i) => i.text)
-  });
+  kbEmbeddings = [];
 
-  kbEmbeddings = result.embeddings.map((e) => e.values);
+  for (const item of items) {
+    const res = await embedder.embedContent({
+      content: {
+        parts: [{ text: item.text }]
+      }
+    });
+
+    kbEmbeddings.push(res.embedding.values);
+  }
 
   return kbEmbeddings;
 }
 
 
-// ----------------------------------
-// POST handler
-// ----------------------------------
+
 export async function POST(req) {
   try {
     const body = await req.json();
     const question = body.question;
 
     if (!question) {
-      return new Response(
-        JSON.stringify({ error: "Missing question" }),
-        { status: 400 }
-      );
+      return new Response(JSON.stringify({ error: "No question provided" }), { status: 400 });
     }
 
-    // Load KB + embeddings
+    // Load static KB + embeddings
     const kbItems = await loadKB();
-    const embeddings = await ensureKBEmbeddings();
+    const staticEmbeddings = await ensureKBEmbeddings();
 
-    // Get embedding for user query
+ 
+    const allTexts = [
+      ...kbItems.map(i => i.text),
+      ...dynamicKB
+    ];
+
+    const allEmbeddings = [
+      ...staticEmbeddings,
+      ...dynamicEmbeddings
+    ];
+
+    // -------- Embedding user query ----------
     const embedder = genAI.getGenerativeModel({ model: EMBED_MODEL });
-    const qEmbedRes = await embedder.embedContent({ content: question });
-    const qEmb = qEmbedRes.embedding.values;
 
-    // Compute similarities
-    const sims = embeddings.map((e, i) => ({
-      idx: i,
-      score: cosineSim(qEmb, e)
-    })).sort((a, b) => b.score - a.score);
+    const qRes = await embedder.embedContent({
+      content: { parts: [{ text: question }] }
+    });
 
-    // Top 3 retrieved
+    const qEmb = qRes.embedding.values;
+
+    // -------- Calculate similarity ----------
+    const sims = allEmbeddings
+      .map((emb, idx) => ({
+        idx,
+        score: cosineSim(qEmb, emb)
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    // Top 3 relevant documents
     const top = sims.slice(0, 3);
 
-    // Build context chunk
-    const context = top.map(t => {
-      const kbItem = kbItems[t.idx];
-      return `Title: ${kbItem.title}\nText: ${kbItem.text}`;
-    }).join("\n\n---\n\n");
+    // ---------------------------
+    // Build hybrid RAG context
+    // ---------------------------
+    let context = "";
 
-    // Prepare chat prompt
-    const systemPrompt = `
-You are an AI assistant. Answer the user's question using ONLY the context below.
-If answer is outside the context, say: "I don't know based on the provided context."
-`;
+    top.forEach(t => {
+      const isStatic = t.idx < kbItems.length;
 
-    const fullPrompt = `
-${systemPrompt}
+      if (isStatic) {
+        const item = kbItems[t.idx];
+        context += `STATIC CHUNK:\n${item.title}\n${item.text}\n\n---\n\n`;
+      } else {
+        const dynIndex = t.idx - kbItems.length;
+        context += `UPLOADED CHUNK:\n${dynamicKB[dynIndex]}\n\n---\n\n`;
+      }
+    });
 
-User question: ${question}
+    // -------- Call Gemini Chat Model --------
+    const model = genAI.getGenerativeModel({ model: CHAT_MODEL });
+
+    const prompt = `
+You are a helpful RAG assistant.
+Use ONLY the context below to answer the user's question.
+If the answer is not in the context, say: "I don't know based on the given context."
+
+User question:
+${question}
 
 Context:
 ${context}
@@ -111,24 +140,29 @@ ${context}
 Answer:
 `;
 
-    // Generate answer using Gemini Flash
-    const chatModel = genAI.getGenerativeModel({ model: CHAT_MODEL });
+    const result = await model.generateContent(prompt);
+    const answer = result.response.text();
 
-    const response = await chatModel.generateContent(fullPrompt);
-    const answer = response.response.text();
-
-    const sourceTitles = top.map(t => kbItems[t.idx].title);
+    // Prepare source titles
+    const sources = top.map(t => {
+      if (t.idx < kbItems.length) {
+        return kbItems[t.idx].title;
+      } else {
+        return "Uploaded File Chunk";
+      }
+    });
 
     return new Response(
-      JSON.stringify({ answer, sources: sourceTitles }),
+      JSON.stringify({ answer, sources }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
 
   } catch (err) {
-    console.error("RAG Error:", err);
+    console.error("Gemini RAG Error:", err);
     return new Response(
-      JSON.stringify({ error: err.message || "Server error" }),
+      JSON.stringify({ error: err.message }),
       { status: 500 }
     );
   }
 }
+
