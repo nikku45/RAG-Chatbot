@@ -1,3 +1,6 @@
+export const runtime = "nodejs";
+
+
 import { dynamicKB, dynamicEmbeddings } from "../upload/route.js";
 import fs from "fs";
 import path from "path";
