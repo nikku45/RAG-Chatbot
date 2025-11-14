@@ -34,7 +34,8 @@ function cosineSim(a, b) {
 async function loadKB() {
   if (kb) return kb;
 
-  const file = path.join(process.cwd(), "data", "knowledge.json");
+const file = path.join(process.cwd(), "app", "data", "knowledge.json");
+
   kb = JSON.parse(fs.readFileSync(file, "utf8"));
   return kb;
 }
